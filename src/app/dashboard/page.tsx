@@ -42,7 +42,7 @@ export default function DashboardPage() {
     };
   }, []); // Empty deps since these are constant
 
-  const { WORKDAY_START, LATE_THRESHOLD, ABSENT_THRESHOLD, WORK_HOURS } = timeConstants;
+  const { LATE_THRESHOLD, ABSENT_THRESHOLD } = timeConstants;
 
   // Add ref to track initial mount
   const isInitialMount = useRef(true);
@@ -94,76 +94,9 @@ export default function DashboardPage() {
     }
   }, [user?.uid, hasCheckedInToday, hasCheckedOutToday, loading, isProcessing, error, isFirebaseReady]);
 
-  // Single effect for Firebase initialization
-  useEffect(() => {
-    if (!firebaseDb) return;
-    
-    // One-time initialization
-    setIsFirebaseReady(true);
-    checkTodayAttendance();
-  }, [firebaseDb]); // Only run when Firebase is available
-
-  // Combine attendance check and interval into one effect
-  useEffect(() => {
-    if (!isFirebaseReady || !user) return;
-
-    // Set up interval only if needed
-    let interval: NodeJS.Timeout | undefined;
-    
-    if (!hasCheckedOutToday && !hasCheckedInToday) {
-      interval = setInterval(() => {
-        checkTodayAttendance();
-      }, 300000); // 5 minutes
-    }
-
-    return () => {
-      if (interval) {
-        clearInterval(interval);
-      }
-    };
-  }, [isFirebaseReady, user, hasCheckedOutToday, hasCheckedInToday]);
-
-  // Memoize the records fetch callback
-  const fetchAttendanceRecords = useCallback(async () => {
-    if (!user || !firebaseDb || !isFirebaseReady) return;
-
-    try {
-      setLoadingRecords(true);
-      const startDate = new Date();
-      startDate.setDate(1);
-      startDate.setHours(0, 0, 0, 0);
-      
-      const attendanceRef = collection(firebaseDb, 'attendance');
-      const q = query(
-        attendanceRef,
-        where('userId', '==', user.uid),
-        where('date', '>=', Timestamp.fromDate(startDate)),
-        orderBy('date', 'desc')
-      );
-
-      const querySnapshot = await getDocs(q);
-      const records = querySnapshot.docs.map(doc => ({
-        id: doc.id,
-        ...doc.data()
-      })) as AttendanceRecord[];
-
-      setAttendanceRecords(records);
-    } catch (error) {
-      console.error('Error fetching attendance records:', error);
-    } finally {
-      setLoadingRecords(false);
-    }
-  }, [user?.uid, firebaseDb, isFirebaseReady]);
-
-  // Fetch records only when needed
-  useEffect(() => {
-    if (attendanceRecords.length === 0 || hasCheckedInToday || hasCheckedOutToday) {
-      fetchAttendanceRecords();
-    }
-  }, [hasCheckedInToday, hasCheckedOutToday]);
-
+  // Move checkTodayAttendance before its usage
   const checkTodayAttendance = useCallback(async () => {
-    if (!user || !firebaseDb || loading) return;
+    if (!user?.uid || !firebaseDb || loading) return;
 
     try {
       setLoading(true);
@@ -175,8 +108,7 @@ export default function DashboardPage() {
       const q = query(
         attendanceRef,
         where('userId', '==', user.uid),
-        where('date', '>=', Timestamp.fromDate(today)),
-        orderBy('date', 'desc')
+        where('date', '>=', Timestamp.fromDate(today))
       );
 
       const querySnapshot = await getDocs(q);
@@ -216,13 +148,80 @@ export default function DashboardPage() {
       setLastCheckIn(null);
       setError(null);
       
-    } catch (error) {
+    } catch (error: unknown) {
       console.error('Error checking attendance:', error);
       setError('Unable to check attendance status. Please try again.');
     } finally {
       setLoading(false);
     }
-  }, [user?.uid, firebaseDb, loading, LATE_THRESHOLD, ABSENT_THRESHOLD]);
+  }, [user?.uid, firebaseDb, loading, LATE_THRESHOLD, ABSENT_THRESHOLD, setError, setHasCheckedInToday, setHasCheckedOutToday, setLastCheckIn, setLoading]);
+
+  // Firebase initialization effect
+  useEffect(() => {
+    if (!firebaseDb) return;
+    
+    setIsFirebaseReady(true);
+    checkTodayAttendance();
+  }, [firebaseDb, checkTodayAttendance]);
+
+  // Combine attendance check and interval into one effect
+  useEffect(() => {
+    if (!isFirebaseReady || !user) return;
+
+    // Set up interval only if needed
+    let interval: NodeJS.Timeout | undefined;
+    
+    if (!hasCheckedOutToday && !hasCheckedInToday) {
+      interval = setInterval(() => {
+        checkTodayAttendance();
+      }, 300000); // 5 minutes
+    }
+
+    return () => {
+      if (interval) {
+        clearInterval(interval);
+      }
+    };
+  }, [isFirebaseReady, user, hasCheckedOutToday, hasCheckedInToday, checkTodayAttendance]);
+
+  // Memoize the records fetch callback
+  const fetchAttendanceRecords = useCallback(async () => {
+    if (!user || !firebaseDb || !isFirebaseReady) return;
+
+    try {
+      setLoadingRecords(true);
+      const startDate = new Date();
+      startDate.setDate(1);
+      startDate.setHours(0, 0, 0, 0);
+      
+      const attendanceRef = collection(firebaseDb, 'attendance');
+      const q = query(
+        attendanceRef,
+        where('userId', '==', user.uid),
+        where('date', '>=', Timestamp.fromDate(startDate)),
+        orderBy('date', 'desc')
+      );
+
+      const querySnapshot = await getDocs(q);
+      const records = querySnapshot.docs.map(doc => ({
+        id: doc.id,
+        ...doc.data()
+      })) as AttendanceRecord[];
+
+      setAttendanceRecords(records);
+    } catch (error) {
+      console.error('Error fetching attendance records:', error);
+    } finally {
+      setLoadingRecords(false);
+    }
+  }, [user?.uid, firebaseDb, isFirebaseReady]);
+
+  // Fetch records only when needed
+  useEffect(() => {
+    if (attendanceRecords.length === 0 || hasCheckedInToday || hasCheckedOutToday) {
+      fetchAttendanceRecords();
+    }
+  }, [hasCheckedInToday, hasCheckedOutToday, attendanceRecords.length, fetchAttendanceRecords]);
 
   const handleCheckIn = async () => {
     console.log('Debug - Check-in button clicked');
@@ -384,7 +383,7 @@ export default function DashboardPage() {
 
       const checkInTime = recordData.inTime.toDate();
       const totalWorkMinutes = differenceInMinutes(now, checkInTime);
-      const standardWorkMinutes = WORK_HOURS * 60;
+      const standardWorkMinutes = 8 * 60;
       const overtimeMinutes = Math.max(0, totalWorkMinutes - standardWorkMinutes);
       const overtimeHours = Math.round(overtimeMinutes / 60 * 100) / 100;
 

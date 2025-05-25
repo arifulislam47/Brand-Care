@@ -1,7 +1,7 @@
 import { initializeApp, getApps, FirebaseApp } from 'firebase/app';
-import { getAuth, browserLocalPersistence, setPersistence } from 'firebase/auth';
-import { getFirestore } from 'firebase/firestore';
-import { getAnalytics } from 'firebase/analytics';
+import { getAuth, browserLocalPersistence, setPersistence, Auth } from 'firebase/auth';
+import { getFirestore, Firestore } from 'firebase/firestore';
+import { getAnalytics, Analytics } from 'firebase/analytics';
 
 const firebaseConfig = {
   apiKey: "AIzaSyBm_LTts_gQ94KuRzb_-h5A0btxoU_xjeE",
@@ -14,9 +14,9 @@ const firebaseConfig = {
 };
 
 let app: FirebaseApp | undefined;
-let auth: any;
-let db: any;
-let analytics: any = null;
+let auth: Auth | undefined;
+let db: Firestore | undefined;
+let analytics: Analytics | undefined = null;
 let initialized = false;
 
 function initializeFirebase() {
@@ -29,11 +29,13 @@ function initializeFirebase() {
     db = getFirestore(app);
 
     // Set persistence
-    setPersistence(auth, browserLocalPersistence).catch((error) => {
-      console.error('Error setting persistence:', error);
-    });
+    if (auth) {
+      setPersistence(auth, browserLocalPersistence).catch((error) => {
+        console.error('Error setting persistence:', error);
+      });
+    }
 
-    if (process.env.NODE_ENV === 'production') {
+    if (process.env.NODE_ENV === 'production' && typeof window !== 'undefined') {
       analytics = getAnalytics(app);
     }
 

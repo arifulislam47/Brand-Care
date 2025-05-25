@@ -3,7 +3,7 @@
 import { useState, useEffect } from 'react';
 import { useAuth } from '@/contexts/AuthContext';
 import { exportedDb as firebaseDb } from '@/lib/firebase';
-import { collection, query, getDocs, where, orderBy, Timestamp } from 'firebase/firestore';
+import { collection, query, getDocs, where, Timestamp } from 'firebase/firestore';
 import { format, differenceInMinutes } from 'date-fns';
 import { jsPDF } from "jspdf";
 import 'jspdf-autotable';
@@ -52,7 +52,7 @@ const calculateDuration = (inTime: Timestamp, outTime: Timestamp | null): string
 };
 
 export default function ReportsPage() {
-  const { user, isManager } = useAuth();
+  const { isManager } = useAuth();
   const [attendanceRecords, setAttendanceRecords] = useState<AttendanceRecord[]>([]);
   const [loading, setLoading] = useState(true);
   const [startDate, setStartDate] = useState(new Date());
@@ -60,6 +60,23 @@ export default function ReportsPage() {
   const [userNames, setUserNames] = useState<{ [key: string]: string }>({});
   const [users, setUsers] = useState<UserData[]>([]);
   const [selectedUser, setSelectedUser] = useState<string>('all');
+  const [summaryStats, setSummaryStats] = useState({
+    total: 0,
+    present: 0,
+    late: 0,
+    absent: 0
+  });
+
+  // Add calculateSummaryStats function
+  const calculateSummaryStats = (records: AttendanceRecord[]) => {
+    const stats = {
+      total: records.length,
+      present: records.filter(r => r.status === 'PRESENT').length,
+      late: records.filter(r => r.status === 'LATE').length,
+      absent: records.filter(r => r.status === 'ABSENT').length
+    };
+    setSummaryStats(stats);
+  };
 
   useEffect(() => {
     if (!isManager) return;
@@ -110,10 +127,7 @@ export default function ReportsPage() {
         }
 
         const baseQuery = query(attendanceRef, ...queryConstraints);
-        console.log('Query constraints:', queryConstraints);
-
         const querySnapshot = await getDocs(baseQuery);
-        console.log('Records found:', querySnapshot.size);
         
         const records = querySnapshot.docs
           .map(doc => ({
@@ -125,6 +139,7 @@ export default function ReportsPage() {
         records.sort((a, b) => b.date.seconds - a.date.seconds);
         
         setAttendanceRecords(records);
+        calculateSummaryStats(records); // Calculate summary stats when records are fetched
       } catch (error) {
         console.error('Error fetching attendance records:', error);
         alert('Error fetching records. Please try again.');
@@ -206,19 +221,36 @@ export default function ReportsPage() {
   }
 
   return (
-    <div className="max-w-7xl mx-auto px-4 sm:px-6 lg:px-8 py-8">
-      <div className="bg-white shadow-lg rounded-lg overflow-hidden">
-        {/* Header Section */}
-        <div className="px-6 py-4 border-b border-gray-200">
-          <h2 className="text-2xl font-bold text-gray-800">Attendance Reports</h2>
-          <p className="mt-1 text-sm text-gray-600">
-            View and download attendance records for all employees
-          </p>
+    <div className="min-h-[calc(100vh-4rem)] bg-gray-50 py-6 sm:py-8 lg:py-12">
+      <div className="mx-auto max-w-screen-xl px-4 md:px-8">
+        <div className="mb-10 md:mb-16">
+          <h2 className="mb-4 text-2xl font-bold text-gray-800 md:mb-6 lg:text-3xl">
+            Attendance Reports
+          </h2>
         </div>
 
-        {/* Filters Section */}
-        <div className="p-6 bg-gray-50 border-b border-gray-200">
-          <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-4 gap-4">
+        {/* Add Summary Statistics Card */}
+        <div className="mb-6 grid grid-cols-2 sm:grid-cols-4 gap-4">
+          <div className="bg-white rounded-lg shadow p-4">
+            <h3 className="text-lg font-semibold text-gray-800">Total Records</h3>
+            <p className="text-3xl font-bold text-blue-600">{summaryStats.total}</p>
+          </div>
+          <div className="bg-white rounded-lg shadow p-4">
+            <h3 className="text-lg font-semibold text-gray-800">Present</h3>
+            <p className="text-3xl font-bold text-green-600">{summaryStats.present}</p>
+          </div>
+          <div className="bg-white rounded-lg shadow p-4">
+            <h3 className="text-lg font-semibold text-gray-800">Late</h3>
+            <p className="text-3xl font-bold text-yellow-600">{summaryStats.late}</p>
+          </div>
+          <div className="bg-white rounded-lg shadow p-4">
+            <h3 className="text-lg font-semibold text-gray-800">Absent</h3>
+            <p className="text-3xl font-bold text-red-600">{summaryStats.absent}</p>
+          </div>
+        </div>
+
+        <div className="mb-6 bg-white rounded-lg shadow p-4 md:p-8">
+          <div className="flex flex-col md:flex-row gap-4 mb-6">
             <div className="space-y-1">
               <label htmlFor="employee" className="block text-sm font-medium text-gray-700">
                 Employee
@@ -368,13 +400,6 @@ export default function ReportsPage() {
               )}
             </tbody>
           </table>
-        </div>
-
-        {/* Summary Section */}
-        <div className="px-6 py-4 bg-gray-50 border-t border-gray-200">
-          <p className="text-sm text-gray-600">
-            Total Records: {attendanceRecords.length}
-          </p>
         </div>
       </div>
     </div>
