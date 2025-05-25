@@ -1,206 +1,354 @@
 'use client';
 
-import { useState, useEffect } from 'react';
+import { useState, useEffect, useCallback, useRef, useMemo } from 'react';
 import { useAuth } from '@/contexts/AuthContext';
-import { db } from '@/lib/firebase';
+import { exportedDb as firebaseDb } from '@/lib/firebase';
 import { collection, query, getDocs, where, addDoc, Timestamp, orderBy, updateDoc, doc } from 'firebase/firestore';
-import { format, isToday, setHours, setMinutes, differenceInMinutes, isBefore, isAfter, startOfMonth } from 'date-fns';
-import Link from 'next/link';
+import { format, isToday, setHours, setMinutes, differenceInMinutes, isAfter } from 'date-fns';
+
+interface AttendanceRecord {
+  id: string;
+  userId: string;
+  date: Timestamp;
+  inTime: Timestamp;
+  outTime: Timestamp | null;
+  status: 'PRESENT' | 'LATE' | 'ABSENT';
+  overtime: number;
+}
 
 export default function DashboardPage() {
   const { user } = useAuth();
   const [hasCheckedInToday, setHasCheckedInToday] = useState(false);
   const [hasCheckedOutToday, setHasCheckedOutToday] = useState(false);
   const [lastCheckIn, setLastCheckIn] = useState<Timestamp | null>(null);
-  const [loading, setLoading] = useState(true);
+  const [loading, setLoading] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const [isProcessing, setIsProcessing] = useState(false);
-  const [attendanceRecords, setAttendanceRecords] = useState<any[]>([]);
+  const [attendanceRecords, setAttendanceRecords] = useState<AttendanceRecord[]>([]);
   const [loadingRecords, setLoadingRecords] = useState(true);
+  const [isFirebaseReady, setIsFirebaseReady] = useState(false);
+  
+  // Initialize interval ref with undefined
+  const intervalRef = useRef<NodeJS.Timeout | undefined>(undefined);
 
-  // Constants for time rules
-  const WORKDAY_START = setHours(setMinutes(new Date(), 0), 10); // 10:00 AM
-  const LATE_THRESHOLD = setHours(setMinutes(new Date(), 15), 10); // 10:15 AM
-  const ABSENT_THRESHOLD = setHours(setMinutes(new Date(), 0), 11); // 11:00 AM
-  const WORK_HOURS = 8; // 8 hours standard work day
-
-  useEffect(() => {
-    if (!user) return;
-
-    const checkTodayAttendance = async () => {
-      try {
-        setLoading(true);
-        setError(null);
-        const today = new Date();
-        today.setHours(0, 0, 0, 0);
-
-        const attendanceRef = collection(db, 'attendance');
-        const q = query(
-          attendanceRef,
-          where('userId', '==', user.uid),
-          where('date', '>=', Timestamp.fromDate(today)),
-          orderBy('date', 'desc')
-        );
-
-        const querySnapshot = await getDocs(q);
-        const todayRecord = querySnapshot.docs.find(doc => 
-          isToday(doc.data().date.toDate())
-        );
-
-        if (todayRecord) {
-          const recordData = todayRecord.data();
-          
-          if (recordData.outTime) {
-            setHasCheckedInToday(false);
-            setHasCheckedOutToday(true);
-            setLastCheckIn(null);
-            setError('You have completed your attendance for today');
-            return;
-          }
-
-          if (recordData.inTime) {
-            setHasCheckedInToday(true);
-            setHasCheckedOutToday(false);
-            setLastCheckIn(recordData.inTime);
-
-            const checkInTime = recordData.inTime.toDate();
-            if (recordData.status === 'ABSENT' || isAfter(checkInTime, ABSENT_THRESHOLD)) {
-              setError('Checked in after 11:00 AM. This will be marked as absent.');
-            } else if (recordData.status === 'LATE' || isAfter(checkInTime, LATE_THRESHOLD)) {
-              setError('Checked in late. This will be marked as late attendance.');
-            } else {
-              setError(null);
-            }
-            return;
-          }
-        }
-        
-        setHasCheckedInToday(false);
-        setHasCheckedOutToday(false);
-        setLastCheckIn(null);
-        setError(null);
-        
-      } catch (error: any) {
-        console.error('Error checking attendance:', error);
-        if (error.message?.includes('requires an index')) {
-          setError('System is updating. Please try again in a few minutes.');
-        } else {
-          setError('Unable to check attendance status. Please try again.');
-        }
-      } finally {
-        setLoading(false);
-      }
+  // Memoize time constants to prevent recalculation
+  const timeConstants = useMemo(() => {
+    const now = new Date();
+    return {
+      WORKDAY_START: setHours(setMinutes(new Date(now), 0), 10),
+      LATE_THRESHOLD: setHours(setMinutes(new Date(now), 15), 10),
+      ABSENT_THRESHOLD: setHours(setMinutes(new Date(now), 0), 11),
+      WORK_HOURS: 8
     };
+  }, []); // Empty deps since these are constant
 
+  const { WORKDAY_START, LATE_THRESHOLD, ABSENT_THRESHOLD, WORK_HOURS } = timeConstants;
+
+  // Add ref to track initial mount
+  const isInitialMount = useRef(true);
+  const prevState = useRef({
+    hasCheckedInToday: false,
+    hasCheckedOutToday: false,
+    loading: false,
+    isProcessing: false
+  });
+
+  // Single debug effect that only runs on mount and state changes
+  useEffect(() => {
+    if (isInitialMount.current) {
+      console.log('Debug - Initial Component State:', {
+        user: user?.uid,
+        hasCheckedInToday,
+        hasCheckedOutToday,
+        loading,
+        isProcessing,
+        error,
+        firebaseDb: !!firebaseDb,
+        isFirebaseReady
+      });
+      isInitialMount.current = false;
+      return;
+    }
+
+    // Only log if relevant states have changed
+    if (prevState.current.hasCheckedInToday !== hasCheckedInToday ||
+        prevState.current.hasCheckedOutToday !== hasCheckedOutToday ||
+        prevState.current.loading !== loading ||
+        prevState.current.isProcessing !== isProcessing) {
+      
+      console.log('Debug - State Changed:', {
+        hasCheckedInToday,
+        hasCheckedOutToday,
+        loading,
+        isProcessing,
+        error
+      });
+
+      // Update previous state
+      prevState.current = {
+        hasCheckedInToday,
+        hasCheckedOutToday,
+        loading,
+        isProcessing
+      };
+    }
+  }, [user?.uid, hasCheckedInToday, hasCheckedOutToday, loading, isProcessing, error, isFirebaseReady]);
+
+  // Single effect for Firebase initialization
+  useEffect(() => {
+    if (!firebaseDb) return;
+    
+    // One-time initialization
+    setIsFirebaseReady(true);
     checkTodayAttendance();
-    const interval = setInterval(checkTodayAttendance, 60000);
+  }, [firebaseDb]); // Only run when Firebase is available
 
-    return () => clearInterval(interval);
-  }, [user]);
-
+  // Combine attendance check and interval into one effect
   useEffect(() => {
-    if (!user) return;
+    if (!isFirebaseReady || !user) return;
 
-    const fetchAttendanceRecords = async () => {
-      try {
-        setLoadingRecords(true);
-        const startDate = startOfMonth(new Date()); // Get records from start of current month
-        
-        const attendanceRef = collection(db, 'attendance');
-        const q = query(
-          attendanceRef,
-          where('userId', '==', user.uid),
-          where('date', '>=', Timestamp.fromDate(startDate)),
-          orderBy('date', 'desc')
-        );
+    // Set up interval only if needed
+    let interval: NodeJS.Timeout | undefined;
+    
+    if (!hasCheckedOutToday && !hasCheckedInToday) {
+      interval = setInterval(() => {
+        checkTodayAttendance();
+      }, 300000); // 5 minutes
+    }
 
-        const querySnapshot = await getDocs(q);
-        const records = querySnapshot.docs.map(doc => ({
-          id: doc.id,
-          ...doc.data()
-        }));
-
-        setAttendanceRecords(records);
-      } catch (error) {
-        console.error('Error fetching attendance records:', error);
-      } finally {
-        setLoadingRecords(false);
+    return () => {
+      if (interval) {
+        clearInterval(interval);
       }
     };
+  }, [isFirebaseReady, user, hasCheckedOutToday, hasCheckedInToday]);
 
-    fetchAttendanceRecords();
-  }, [user, hasCheckedInToday, hasCheckedOutToday]); // Refresh when check-in/out status changes
-
-  const handleCheckIn = async () => {
-    if (!user || isProcessing) return;
+  // Memoize the records fetch callback
+  const fetchAttendanceRecords = useCallback(async () => {
+    if (!user || !firebaseDb || !isFirebaseReady) return;
 
     try {
-      setIsProcessing(true);
-      setError(null);
-      const now = new Date();
+      setLoadingRecords(true);
+      const startDate = new Date();
+      startDate.setDate(1);
+      startDate.setHours(0, 0, 0, 0);
       
-      const today = new Date();
-      today.setHours(0, 0, 0, 0);
-      
-      const attendanceRef = collection(db, 'attendance');
+      const attendanceRef = collection(firebaseDb, 'attendance');
       const q = query(
         attendanceRef,
         where('userId', '==', user.uid),
-        where('date', '>=', Timestamp.fromDate(today))
+        where('date', '>=', Timestamp.fromDate(startDate)),
+        orderBy('date', 'desc')
       );
+
+      const querySnapshot = await getDocs(q);
+      const records = querySnapshot.docs.map(doc => ({
+        id: doc.id,
+        ...doc.data()
+      })) as AttendanceRecord[];
+
+      setAttendanceRecords(records);
+    } catch (error) {
+      console.error('Error fetching attendance records:', error);
+    } finally {
+      setLoadingRecords(false);
+    }
+  }, [user?.uid, firebaseDb, isFirebaseReady]);
+
+  // Fetch records only when needed
+  useEffect(() => {
+    if (attendanceRecords.length === 0 || hasCheckedInToday || hasCheckedOutToday) {
+      fetchAttendanceRecords();
+    }
+  }, [hasCheckedInToday, hasCheckedOutToday]);
+
+  const checkTodayAttendance = useCallback(async () => {
+    if (!user || !firebaseDb || loading) return;
+
+    try {
+      setLoading(true);
       
+      const today = new Date();
+      today.setHours(0, 0, 0, 0);
+
+      const attendanceRef = collection(firebaseDb, 'attendance');
+      const q = query(
+        attendanceRef,
+        where('userId', '==', user.uid),
+        where('date', '>=', Timestamp.fromDate(today)),
+        orderBy('date', 'desc')
+      );
+
       const querySnapshot = await getDocs(q);
       const todayRecord = querySnapshot.docs.find(doc => 
         isToday(doc.data().date.toDate())
       );
 
       if (todayRecord) {
-        setError('You have already checked in today');
-        return;
+        const recordData = todayRecord.data();
+        
+        if (recordData.outTime) {
+          setHasCheckedInToday(false);
+          setHasCheckedOutToday(true);
+          setLastCheckIn(null);
+          return;
+        }
+
+        if (recordData.inTime) {
+          setHasCheckedInToday(true);
+          setHasCheckedOutToday(false);
+          setLastCheckIn(recordData.inTime);
+
+          const checkInTime = recordData.inTime.toDate();
+          if (recordData.status === 'ABSENT' || isAfter(checkInTime, ABSENT_THRESHOLD)) {
+            setError('Checked in after 11:00 AM. This will be marked as absent.');
+          } else if (recordData.status === 'LATE' || isAfter(checkInTime, LATE_THRESHOLD)) {
+            setError('Checked in late. This will be marked as late attendance.');
+          } else {
+            setError(null);
+          }
+          return;
+        }
       }
 
-      let status = 'PRESENT';
-      if (isAfter(now, ABSENT_THRESHOLD)) {
-        status = 'ABSENT';
-      } else if (isAfter(now, LATE_THRESHOLD)) {
-        status = 'LATE';
-      }
+      setHasCheckedInToday(false);
+      setHasCheckedOutToday(false);
+      setLastCheckIn(null);
+      setError(null);
+      
+    } catch (error) {
+      console.error('Error checking attendance:', error);
+      setError('Unable to check attendance status. Please try again.');
+    } finally {
+      setLoading(false);
+    }
+  }, [user?.uid, firebaseDb, loading, LATE_THRESHOLD, ABSENT_THRESHOLD]);
 
+  const handleCheckIn = async () => {
+    console.log('Debug - Check-in button clicked');
+    
+    // Reset any previous errors
+    setError(null);
+
+    // Basic validation checks
+    if (!user) {
+      console.log('Debug - No user found');
+      setError('Please log in to check in.');
+      return;
+    }
+
+    if (!firebaseDb) {
+      console.log('Debug - Firebase DB not initialized');
+      setError('System is not ready. Please refresh the page and try again.');
+      return;
+    }
+
+    if (isProcessing) {
+      console.log('Debug - Already processing');
+      setError('Please wait, processing previous request...');
+      return;
+    }
+
+    try {
+      console.log('Debug - Starting check-in process');
+      setIsProcessing(true);
+
+      // Get current time
+      const now = new Date();
+      console.log('Debug - Current time:', now.toLocaleString());
+
+      // Set today to midnight for comparison
+      const today = new Date();
+      today.setHours(0, 0, 0, 0);
+      console.log('Debug - Today at midnight:', today.toLocaleString());
+
+      // Create simple attendance record
       const attendanceData = {
         userId: user.uid,
         date: Timestamp.fromDate(today),
         inTime: Timestamp.fromDate(now),
         outTime: null,
-        status: status,
+        status: isAfter(now, ABSENT_THRESHOLD) ? 'ABSENT' : 
+                isAfter(now, LATE_THRESHOLD) ? 'LATE' : 'PRESENT',
         overtime: 0,
       };
 
-      await addDoc(collection(db, 'attendance'), attendanceData);
+      console.log('Debug - Attendance data:', attendanceData);
+
+      // Add the record
+      const docRef = await addDoc(collection(firebaseDb, 'attendance'), attendanceData);
+      console.log('Debug - Added attendance record with ID:', docRef.id);
+
+      // Update UI state
       setHasCheckedInToday(true);
-      setHasCheckedOutToday(false);
       setLastCheckIn(Timestamp.fromDate(now));
       
-      if (status === 'LATE') {
+      // Set appropriate message
+      if (attendanceData.status === 'LATE') {
         setError('Checked in late. This will be marked as late attendance.');
-      } else if (status === 'ABSENT') {
+      } else if (attendanceData.status === 'ABSENT') {
         setError('Checked in after 11:00 AM. This will be marked as absent.');
       } else {
         setError('Successfully checked in!');
       }
+
+      // Refresh the records
+      await fetchAttendanceRecords();
+
     } catch (error: any) {
-      console.error('Error checking in:', error);
-      if (error.message?.includes('requires an index')) {
+      console.error('Debug - Check-in error:', error);
+      
+      // Handle specific Firebase errors
+      if (error?.code === 'permission-denied') {
+        setError('You do not have permission to check in. Please contact your administrator.');
+      } else if (error?.code === 'unavailable') {
+        setError('Service is currently unavailable. Please try again later.');
+      } else if (error?.message?.includes('requires an index')) {
         setError('System is updating. Please try again in a few minutes.');
       } else {
-        setError(`Unable to check in: ${error.message}`);
+        setError('Unable to check in. Please try again. If the problem persists, contact support.');
       }
     } finally {
       setIsProcessing(false);
     }
   };
 
+  // Modify the button render to be more informative
+  const renderCheckInButton = () => {
+    const buttonText = isProcessing ? 'Processing...' : 'Check In';
+    const isDisabled = hasCheckedInToday || hasCheckedOutToday || isProcessing;
+    const buttonClass = `flex-1 px-4 py-2.5 rounded-lg text-sm md:text-base font-medium ${
+      isDisabled
+        ? 'bg-gray-300 cursor-not-allowed'
+        : 'bg-blue-600 hover:bg-blue-700 active:bg-blue-800'
+    } text-white focus:outline-none focus:ring-2 focus:ring-blue-500 focus:ring-offset-2 transition-colors duration-200 min-w-[120px] justify-center items-center inline-flex`;
+
+    return (
+      <button
+        onClick={handleCheckIn}
+        disabled={isDisabled}
+        className={buttonClass}
+        title={
+          hasCheckedInToday ? 'Already checked in' :
+          hasCheckedOutToday ? 'Already checked out' :
+          isProcessing ? 'Processing...' :
+          'Click to check in'
+        }
+      >
+        {isProcessing ? (
+          <>
+            <div className="w-4 h-4 border-2 border-white border-t-transparent rounded-full animate-spin mr-2"></div>
+            <span>Processing...</span>
+          </>
+        ) : (
+          buttonText
+        )}
+      </button>
+    );
+  };
+
   const handleCheckOut = async () => {
-    if (!user || isProcessing) return;
+    if (!user || !firebaseDb || isProcessing) return;
 
     try {
       setIsProcessing(true);
@@ -210,7 +358,7 @@ export default function DashboardPage() {
       const today = new Date();
       today.setHours(0, 0, 0, 0);
       
-      const attendanceRef = collection(db, 'attendance');
+      const attendanceRef = collection(firebaseDb, 'attendance');
       const q = query(
         attendanceRef,
         where('userId', '==', user.uid),
@@ -240,19 +388,18 @@ export default function DashboardPage() {
       const overtimeMinutes = Math.max(0, totalWorkMinutes - standardWorkMinutes);
       const overtimeHours = Math.round(overtimeMinutes / 60 * 100) / 100;
 
-      await updateDoc(doc(db, 'attendance', todayRecord.id), {
+      await updateDoc(doc(firebaseDb, 'attendance', todayRecord.id), {
         outTime: Timestamp.fromDate(now),
         overtime: overtimeHours
       });
 
-      setHasCheckedInToday(false);
-      setHasCheckedOutToday(true);
-      setLastCheckIn(null);
+      await checkTodayAttendance(); // Refresh attendance status
+      await fetchAttendanceRecords(); // Refresh records
       setError('Successfully checked out!');
       
-    } catch (error: any) {
+    } catch (error: unknown) {
       console.error('Error checking out:', error);
-      if (error.message?.includes('requires an index')) {
+      if (error && typeof error === 'object' && 'message' in error && typeof error.message === 'string' && error.message.includes('requires an index')) {
         setError('System is updating. Please try again in a few minutes.');
       } else {
         setError('Unable to check out. Please try again.');
@@ -262,18 +409,43 @@ export default function DashboardPage() {
     }
   };
 
+  // Modify the button render to be more informative
+  const renderCheckOutButton = () => {
+    const buttonText = isProcessing ? 'Processing...' : 'Check Out';
+    const isDisabled = !hasCheckedInToday || isProcessing;
+    const buttonClass = `flex-1 px-4 py-2.5 rounded-lg text-sm md:text-base font-medium ${
+      isDisabled
+        ? 'bg-gray-300 cursor-not-allowed'
+        : 'bg-green-600 hover:bg-green-700 active:bg-green-800'
+    } text-white focus:outline-none focus:ring-2 focus:ring-green-500 focus:ring-offset-2 transition-colors duration-200 min-w-[120px] justify-center items-center inline-flex`;
+
+    return (
+      <button
+        onClick={handleCheckOut}
+        disabled={isDisabled}
+        className={buttonClass}
+        title={
+          !hasCheckedInToday ? 'Check in first' :
+          isProcessing ? 'Processing...' :
+          'Click to check out'
+        }
+      >
+        {isProcessing ? (
+          <>
+            <div className="w-4 h-4 border-2 border-white border-t-transparent rounded-full animate-spin mr-2"></div>
+            <span>Processing...</span>
+          </>
+        ) : (
+          buttonText
+        )}
+      </button>
+    );
+  };
+
   if (!user) {
     return (
       <div className="flex justify-center items-center min-h-[calc(100vh-4rem)]">
         <p className="text-gray-600 text-center px-4">Please log in to access the attendance system.</p>
-      </div>
-    );
-  }
-
-  if (loading) {
-    return (
-      <div className="flex justify-center items-center min-h-[calc(100vh-4rem)]">
-        <div className="animate-spin rounded-full h-12 w-12 border-b-2 border-blue-600"></div>
       </div>
     );
   }
@@ -322,43 +494,8 @@ export default function DashboardPage() {
               </div>
 
               <div className="flex flex-col sm:flex-row gap-3 sm:gap-4">
-                <button
-                  onClick={handleCheckIn}
-                  disabled={hasCheckedInToday || hasCheckedOutToday || loading || isProcessing}
-                  className={`flex-1 px-4 py-2.5 rounded-lg text-sm md:text-base font-medium ${
-                    hasCheckedInToday || hasCheckedOutToday || isProcessing
-                      ? 'bg-gray-300 cursor-not-allowed'
-                      : 'bg-blue-600 hover:bg-blue-700 active:bg-blue-800'
-                  } text-white focus:outline-none focus:ring-2 focus:ring-blue-500 focus:ring-offset-2 transition-colors duration-200 min-w-[120px] justify-center items-center inline-flex`}
-                >
-                  {isProcessing ? (
-                    <>
-                      <div className="w-4 h-4 border-2 border-white border-t-transparent rounded-full animate-spin mr-2"></div>
-                      <span>Processing...</span>
-                    </>
-                  ) : (
-                    'Check In'
-                  )}
-                </button>
-
-                <button
-                  onClick={handleCheckOut}
-                  disabled={!hasCheckedInToday || loading || isProcessing}
-                  className={`flex-1 px-4 py-2.5 rounded-lg text-sm md:text-base font-medium ${
-                    !hasCheckedInToday || isProcessing
-                      ? 'bg-gray-300 cursor-not-allowed'
-                      : 'bg-green-600 hover:bg-green-700 active:bg-green-800'
-                  } text-white focus:outline-none focus:ring-2 focus:ring-green-500 focus:ring-offset-2 transition-colors duration-200 min-w-[120px] justify-center items-center inline-flex`}
-                >
-                  {isProcessing ? (
-                    <>
-                      <div className="w-4 h-4 border-2 border-white border-t-transparent rounded-full animate-spin mr-2"></div>
-                      <span>Processing...</span>
-                    </>
-                  ) : (
-                    'Check Out'
-                  )}
-                </button>
+                {renderCheckInButton()}
+                {renderCheckOutButton()}
               </div>
             </div>
           </div>

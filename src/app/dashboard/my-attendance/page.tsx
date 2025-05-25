@@ -2,7 +2,7 @@
 
 import { useState, useEffect } from 'react';
 import { useAuth } from '@/contexts/AuthContext';
-import { db } from '@/lib/firebase';
+import { exportedDb as firebaseDb } from '@/lib/firebase';
 import { collection, query, getDocs, where, Timestamp, orderBy } from 'firebase/firestore';
 import { format, startOfMonth, endOfMonth } from 'date-fns';
 import DatePicker from 'react-datepicker';
@@ -40,7 +40,7 @@ export default function MyAttendancePage() {
         const start = startOfMonth(selectedMonth);
         const end = endOfMonth(selectedMonth);
 
-        const attendanceRef = collection(db, 'attendance');
+        const attendanceRef = collection(firebaseDb, 'attendance');
         const q = query(
           attendanceRef,
           where('userId', '==', user.uid),
@@ -57,11 +57,11 @@ export default function MyAttendancePage() {
 
         setAttendanceRecords(records);
         setIsCreatingIndex(false);
-      } catch (error: any) {
+      } catch (error: unknown) {
         console.error('Error fetching attendance records:', error);
         
         // If the error is about missing index, set the isCreatingIndex state
-        if (error?.message?.includes('index')) {
+        if (error && typeof error === 'object' && 'message' in error && typeof error.message === 'string' && error.message.includes('index')) {
           setIsCreatingIndex(true);
           // Try again after a short delay to allow index creation
           setTimeout(() => {

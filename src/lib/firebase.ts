@@ -1,5 +1,5 @@
-import { initializeApp, getApps } from 'firebase/app';
-import { getAuth } from 'firebase/auth';
+import { initializeApp, getApps, FirebaseApp } from 'firebase/app';
+import { getAuth, browserLocalPersistence, setPersistence } from 'firebase/auth';
 import { getFirestore } from 'firebase/firestore';
 import { getAnalytics } from 'firebase/analytics';
 
@@ -13,17 +13,45 @@ const firebaseConfig = {
   measurementId: "G-RPBCVKTKE4"
 };
 
-// Initialize Firebase
-const app = getApps().length === 0 ? initializeApp(firebaseConfig) : getApps()[0];
+let app: FirebaseApp | undefined;
+let auth: any;
+let db: any;
+let analytics: any = null;
+let initialized = false;
 
-// Initialize services
-const auth = getAuth(app);
-const db = getFirestore(app);
+function initializeFirebase() {
+  if (typeof window === 'undefined') return null;
+  if (initialized) return { app, auth, db, analytics };
 
-// Initialize Analytics (only in browser environment)
-let analytics = null;
-if (typeof window !== 'undefined') {
-  analytics = getAnalytics(app);
+  try {
+    app = getApps().length ? getApps()[0] : initializeApp(firebaseConfig);
+    auth = getAuth(app);
+    db = getFirestore(app);
+
+    // Set persistence
+    setPersistence(auth, browserLocalPersistence).catch((error) => {
+      console.error('Error setting persistence:', error);
+    });
+
+    if (process.env.NODE_ENV === 'production') {
+      analytics = getAnalytics(app);
+    }
+
+    initialized = true;
+    console.log('Firebase initialized successfully');
+    return { app, auth, db, analytics };
+  } catch (error) {
+    console.error('Error initializing Firebase:', error);
+    return null;
+  }
 }
 
-export { app, auth, db, analytics }; 
+// Initialize Firebase when this module is imported
+const firebase = initializeFirebase();
+
+// Export initialized instances
+export const { auth: exportedAuth, db: exportedDb, analytics: exportedAnalytics } = firebase || {};
+export { app };
+
+// Export initialization status
+export const isInitialized = () => initialized; 

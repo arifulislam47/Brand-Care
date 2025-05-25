@@ -2,13 +2,27 @@
 
 import { useState, useEffect } from 'react';
 import { useAuth } from '@/contexts/AuthContext';
-import { db } from '@/lib/firebase';
+import { exportedDb as firebaseDb } from '@/lib/firebase';
 import { collection, query, getDocs, where, orderBy, Timestamp } from 'firebase/firestore';
 import { format, differenceInMinutes } from 'date-fns';
 import { jsPDF } from "jspdf";
 import 'jspdf-autotable';
 import DatePicker from 'react-datepicker';
 import 'react-datepicker/dist/react-datepicker.css';
+
+// Add type augmentation for jsPDF
+declare module 'jspdf' {
+  interface jsPDF {
+    autoTable: (options: {
+      head: string[][];
+      body: string[][];
+      startY: number;
+      styles: { fontSize: number };
+      headStyles: { fillColor: number[] };
+      theme: string;
+    }) => void;
+  }
+}
 
 interface AttendanceRecord {
   id: string;
@@ -51,7 +65,7 @@ export default function ReportsPage() {
     if (!isManager) return;
 
     const fetchUsers = async () => {
-      const usersSnapshot = await getDocs(collection(db, 'users'));
+      const usersSnapshot = await getDocs(collection(firebaseDb, 'users'));
       const usersData = usersSnapshot.docs.map(doc => ({
         id: doc.id,
         ...doc.data()
@@ -81,7 +95,7 @@ export default function ReportsPage() {
 
         const startTimestamp = Timestamp.fromDate(start);
         const endTimestamp = Timestamp.fromDate(end);
-        const attendanceRef = collection(db, 'attendance');
+        const attendanceRef = collection(firebaseDb, 'attendance');
 
         let queryConstraints = [
           where('date', '>=', startTimestamp),
@@ -155,7 +169,6 @@ export default function ReportsPage() {
         record.overtime > 0 ? `${record.overtime.toFixed(2)}h` : '-'
       ]);
 
-      // @ts-ignore
       doc.autoTable({
         head: [['Date', 'Employee', 'Check-in', 'Check-out', 'Status', 'Duration', 'Overtime']],
         body: tableData,
